@@ -1,0 +1,19 @@
+[project]
+name = "pocket-cern-collider"
+version = "0.1.0"
+description = "Educational particle-collider simulator: exact relativistic event generation, detector simulation and invariant-mass analysis."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "scipy",
+    "particle",
+    "fastapi",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
