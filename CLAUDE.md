@@ -90,11 +90,39 @@ Detector coordinates are in **metres** (truth vertices in mm are converted on en
   MC truth), `grade(event, particles, channel)` → `Grade` (100 pts: 50 particles, 50 channel,
   partial credit). `deduce_from_clues(clues)` is a clue-only reference solver.
 
+`LuminosityRun.last_event` / `last_selected` hold the most recent `(DetectorEvent, Candidate)`
+so a live display can show a representative event without re-simulating.
+
+## app.py API (FastAPI) + static/index.html
+
+Run: `.venv/Scripts/python app.py` → http://127.0.0.1:8000 (or `python -m uvicorn app:app`).
+JSON is strict (NaN/inf → `null`); display coordinates in **m**, vertices in **mm** (`*_mm`).
+
+- `GET /` — the control room (`static/index.html`: single self-contained file, no build step;
+  URL options `?beam=ee&channel=…&sqrts=…&b=0&view=xy|rz|split&truth=1&anim=0&lumi=1`).
+- `GET /api/config` — beams, channels (label, PDG resonance mass/width, `threshold_gev`,
+  `min_sqrt_s` per beam, recommended √s, mass window, `luminosity`/`mystery` flags),
+  detector layer radii, silicon/muon station radii, towers, field range, fit models.
+- `POST /api/collide` — `{beam, channel, sqrt_s, b_field_tesla, asymmetry (CM β_z),
+  include_background (pp underlying event), signal_fraction=1, seed}` → event payload:
+  `traces` (path/hits/muon_hits polylines (x,y,z), class/fate/origin), `deposits`, `towers`
+  (72 ECAL / 36 HCAL φ-towers), `objects`, `met`, `candidate` (M_inv vs truth), `vertices`
+  (displaced, βγcτ), `balance` (MET closure, truth |ΔP|, ΔQ), `truth` (decay chain).
+- `POST /api/luminosity/step` — `{run_id?, …beam/detector settings, signal_fraction, n_events,
+  n_bins, fit_model}`; continues the run while settings match (fit model excluded), else starts
+  a new one (`new_run: true`). Returns histogram, counts, fit (`mass ± err`, Γ, σ, S/√B,
+  Asimov Z, `discovery` at Z_A ≥ 5, smooth `curve` total/background) once ≥ 30 entries, plus a
+  representative event. `DELETE /api/luminosity/{run_id}` frees a run (LRU of 8 kept anyway).
+- `POST /api/mystery/new` → `{challenge_id, clues, event}` with **all MC truth stripped**
+  (no names/PDG ids/fates/origins, no invisible or truth-only neutral lines);
+  `POST /api/mystery/guess` `{challenge_id, particles, channel}` → `grade` + full `reveal`.
+- Kinematically impossible requests → HTTP 422 with the physics reason.
+
 ## Milestone Checklist
 
 - [x] **Milestone 1 (25%):** Setup + `CLAUDE.md` + `physics_engine.py` built, verified with conservation tests, and committed.
 - [x] **Milestone 2 (50%):** `detector_sim.py` + `invariance_lab.py` built, verified end-to-end in terminal, and committed.
-- [ ] **Milestone 3 (75%):** `app.py` + `static/index.html` interactive CERN Control Room & ATLAS Event Display live on localhost and committed.
+- [x] **Milestone 3 (75%):** `app.py` + `static/index.html` interactive CERN Control Room & ATLAS Event Display live on localhost and committed.
 - [ ] **Milestone 4 (100%):** "Lead Scientist / Mystery Event" educational game mode + Lorentzian resonance peak fitter + polished GitHub `README.md` completed and committed.
 
 Work proceeds strictly one milestone at a time; stop for review after each milestone.

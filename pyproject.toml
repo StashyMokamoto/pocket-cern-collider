@@ -1,6 +1,6 @@
 [project]
 name = "pocket-cern-collider"
-version = "0.1.0"
+version = "0.3.0"
 description = "Educational particle-collider simulator: exact relativistic event generation, detector simulation and invariant-mass analysis."
 requires-python = ">=3.12"
 dependencies = [
@@ -12,8 +12,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "httpx"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    # third-party notice from fastapi.testclient (Starlette suggests httpx2); not our code
+    "ignore:Using `httpx` with `starlette.testclient`",
+]

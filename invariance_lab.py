@@ -455,6 +455,11 @@ class LuminosityRun:
         self.selection = selection
         self.histogram = Histogram(self.window[0], self.window[1], n_bins)
         self.records: list[EventRecord] = []
+        #: most recent simulated event / the most recent one that entered the histogram,
+        #: as (DetectorEvent, Candidate | None) — lets a live display show a representative
+        #: event without re-simulating anything.
+        self.last_event: tuple[DetectorEvent, Candidate | None] | None = None
+        self.last_selected: tuple[DetectorEvent, Candidate] | None = None
 
     def _one(self) -> EventRecord:
         is_sig = self.background is None or self._rng.uniform() < self.signal_fraction
@@ -468,6 +473,8 @@ class LuminosityRun:
         inside = m is not None and self.window[0] <= m < self.window[1]
         if inside:
             self.histogram.fill(m)
+            self.last_selected = (det, cand)
+        self.last_event = (det, cand)
         rec = EventRecord(ev.channel, is_sig, ev.true_mass, m, inside)
         self.records.append(rec)
         return rec
