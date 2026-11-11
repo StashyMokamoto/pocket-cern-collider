@@ -60,10 +60,40 @@ Dependency direction is strictly one-way:
   decay vertices), `final_state()`, `visible_final_state()`, `neutrinos()`,
   `truth_missing_pt()`, `conservation_residual()`, `table()`.
 
+## detector_sim.py public API
+
+Detector coordinates are in **metres** (truth vertices in mm are converted on entry).
+
+- Geometry constants: `R_BEAM_PIPE`, `R_TRACKER`, `R_ECAL`, `R_HCAL`, `R_MUON`,
+  `SILICON_LAYERS_M`, `MUON_STATIONS_M`, `Layer` enum.
+- `DetectorConfig(b_field_t=3.8, eta_max=2.5, ...)` — field (B = 0 allowed), towers, resolutions.
+- `Helix` — exact Larmor helix: `radius`, `center`, `points(s)`, `point_at(s)`,
+  `arc_to_radius(r)` (analytic; `None` for loopers). q·B_z > 0 bends clockwise from +z.
+- `Detector(config, seed).simulate(event) -> DetectorEvent`.
+- `DetectorEvent` — `traces` (per truth particle: `fate`, `path`, `track`, `deposits`),
+  `objects` (`DetectedObject`: electron / photon / muon / charged_hadron / neutral_hadron,
+  smeared `p4`), `deposits`, `met`, `met_phi`, `tower_energies(layer)`, `layer_summary()`,
+  `to_dict()` (JSON payload for the UI).
+- MET is particle-flow style: −Σ p⃗_T over reconstructed objects.
+- `exaggerate_displacement(...)` — display zoom for mm-scale secondary vertices.
+
+## invariance_lab.py public API
+
+- `invariant_mass(objects)`, `reconstruct(det_event, final_state)` with final states
+  `mumu | ee | ll | emu | gammagamma | 4l | auto` → `Candidate` (mass, truth_mass, residual).
+- `Histogram`, `fit_resonance(hist, model)` with models
+  `voigt | breit_wigner | lorentzian | gaussian` (+ exponential continuum) → `FitResult`
+  (`mass ± mass_err`, `width`, `sigma`, `significance` = S/√B, `significance_asimov`).
+- `LuminosityRun(signal_channel, beam, signal_fraction, ...)`: `run(n)` accumulates
+  (incremental — suited to live UI updates), `fit(model)`.
+- `MysteryChallenge(beam, seed)`: `new_event()` → `MysteryEvent` (`public_view()` strips all
+  MC truth), `grade(event, particles, channel)` → `Grade` (100 pts: 50 particles, 50 channel,
+  partial credit). `deduce_from_clues(clues)` is a clue-only reference solver.
+
 ## Milestone Checklist
 
 - [x] **Milestone 1 (25%):** Setup + `CLAUDE.md` + `physics_engine.py` built, verified with conservation tests, and committed.
-- [ ] **Milestone 2 (50%):** `detector_sim.py` + `invariance_lab.py` built, verified end-to-end in terminal, and committed.
+- [x] **Milestone 2 (50%):** `detector_sim.py` + `invariance_lab.py` built, verified end-to-end in terminal, and committed.
 - [ ] **Milestone 3 (75%):** `app.py` + `static/index.html` interactive CERN Control Room & ATLAS Event Display live on localhost and committed.
 - [ ] **Milestone 4 (100%):** "Lead Scientist / Mystery Event" educational game mode + Lorentzian resonance peak fitter + polished GitHub `README.md` completed and committed.
 
