@@ -42,7 +42,7 @@ from the collision point) and an explanation of why the event looked the way it 
 Requires Python 3.12 and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/<you>/pocket-cern-collider.git && cd pocket-cern-collider
+git clone https://github.com/StashyMokamoto/pocket-cern-collider.git && cd pocket-cern-collider
 uv venv --python 3.12 && uv pip install -r requirements.txt
 .venv/Scripts/python -m pytest && .venv/Scripts/python app.py     # macOS/Linux: .venv/bin/python
 ```
@@ -243,3 +243,7 @@ This is a teaching tool, not a physics generator:
 - Cross-sections are not modelled; the signal fraction is a slider.
 
 The kinematics, conservation laws, field geometry and statistics are exact within this model.
+
+## License
+
+[MIT](LICENSE) © 2026 Roni Mizrahi
