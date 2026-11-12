@@ -1,6 +1,6 @@
 [project]
 name = "pocket-cern-collider"
-version = "0.3.0"
+version = "1.0.0"
 description = "Educational particle-collider simulator: exact relativistic event generation, detector simulation and invariant-mass analysis."
 requires-python = ">=3.12"
 dependencies = [

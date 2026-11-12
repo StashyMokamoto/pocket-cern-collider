@@ -33,7 +33,7 @@ from scipy.special import voigt_profile
 
 import detector_sim as ds
 import physics_engine as pe
-from detector_sim import DetectedObject, DetectorConfig, DetectorEvent
+from detector_sim import DetectedObject, DetectorConfig, DetectorEvent, Layer
 from physics_engine import FourVector
 
 # --------------------------------------------------------------------------------------
@@ -508,8 +508,70 @@ class LuminosityRun:
 # --------------------------------------------------------------------------------------
 
 MYSTERY_POOL: tuple[str, ...] = (
-    "z_mumu", "z_ee", "h_gammagamma", "h_zz_4l", "ww_lnulnu", "jpsi_mumu",
+    "z_mumu", "z_ee", "z_tautau", "h_gammagamma", "h_zz_4l", "ww_lnulnu", "jpsi_mumu",
 )
+
+#: Step-A answer categories for the game ("which final-state signature is this?")
+FINAL_STATE_CATEGORIES: dict[str, str] = {
+    "ee": "e⁺e⁻", "mumu": "μ⁺μ⁻", "gammagamma": "γγ", "4l": "4ℓ",
+    "tautau": "τ⁺τ⁻", "llnunu": "ℓ⁺ℓ⁻ + νν̄",
+}
+SIGNATURE_CATEGORY: dict[str, str] = {
+    "z_mumu": "mumu", "jpsi_mumu": "mumu", "z_ee": "ee", "z_tautau": "tautau",
+    "h_gammagamma": "gammagamma", "h_zz_4l": "4l", "ww_lnulnu": "llnunu",
+}
+#: (truth, guess) pairs worth half credit, with the lesson they teach
+PARTIAL_CATEGORIES: dict[tuple[str, str], str] = {
+    ("llnunu", "ee"): "You found the leptons but missed the neutrinos — look at the missing E_T!",
+    ("llnunu", "mumu"): "You found the leptons but missed the neutrinos — look at the missing E_T!",
+    ("tautau", "llnunu"): "Right that neutrinos escaped — but they came from τ decays: note the "
+                          "displaced tracks that miss the collision vertex.",
+    ("llnunu", "tautau"): "Right that neutrinos escaped — but these leptons point straight back "
+                          "to the collision vertex (prompt W decays), so no τ was involved.",
+    ("tautau", "ee"): "The visible electron(s) came from a τ decay — check the displaced tracks "
+                      "and the missing E_T.",
+    ("tautau", "mumu"): "The visible muon(s) came from a τ decay — check the displaced tracks "
+                        "and the missing E_T.",
+}
+#: why each process looks the way it does in the detector
+PHYSICS_WHY: dict[str, str] = {
+    "z_mumu": "Muons are minimum-ionising particles: they cross the ECAL (≈0.3 GeV) and HCAL "
+              "(≈1.5 GeV) almost untouched and are the only charged particles that reach the outer "
+              "muon spectrometer. Two opposite-charge muons with M_inv ≈ 91.19 GeV are a Z⁰.",
+    "jpsi_mumu": "Same muon signature as the Z⁰ — but M_inv ≈ 3.097 GeV: the J/ψ (cc̄) bound "
+                 "state. Its low-momentum muons curl strongly in the 3.8 T field.",
+    "z_ee": "Electrons leave a curved track and then shower completely in the ECAL (a few "
+            "radiation lengths stop them), so nothing reaches the HCAL. Two of them with "
+            "M_inv ≈ 91 GeV are a Z⁰.",
+    "z_tautau": "The τ lepton lives only cτ ≈ 87 µm, but with βγ ≈ 25 it flies a few mm before "
+                "decaying — its daughter tracks miss the collision vertex (displaced vertex). Every "
+                "τ decay emits one or two neutrinos, so there is missing E_T and the visible mass "
+                "sits well below m_Z.",
+    "h_gammagamma": "Photons are neutral: no tracker hits and no curvature — just isolated ECAL "
+                    "towers. Two such towers with M_inv ≈ 125 GeV are the Higgs diphoton signature "
+                    "(the 2012 discovery channel).",
+    "h_zz_4l": "Four leptons in two opposite-charge same-flavour pairs: one pair at m_Z (on-shell Z), "
+               "the other far below it (off-shell Z*), all four combining to M_inv ≈ 125 GeV — "
+               "the 'golden' Higgs channel.",
+    "ww_lnulnu": "Each W decays to a charged lepton plus a neutrino. The two neutrinos escape "
+                 "unseen, leaving large missing E_T, and M_ℓℓ shows no resonance peak. The leptons "
+                 "are prompt — they point straight back to the collision vertex.",
+}
+DISPLACED_D0_MM = 0.03  # |d₀| above 30 µm ⇒ track does not come from the primary vertex
+DISPLACED_MIN_PT = 2.0  # GeV — ignore soft (underlying-event K⁰_S) tracks
+
+
+def transverse_impact_parameter_mm(track, primary_vertex_mm) -> float:
+    """|d₀|: transverse distance of closest approach of a track's helix to the primary vertex.
+    Purely detector-level (helix geometry), so it may be shown to the Mystery player."""
+    h = track.helix
+    px, py = primary_vertex_mm[0] * ds.MM_TO_M, primary_vertex_mm[1] * ds.MM_TO_M
+    if h.h == 0:
+        d = abs((h.x0 - px) * math.sin(h.phi0) - (h.y0 - py) * math.cos(h.phi0))
+    else:
+        xc, yc = h.center
+        d = abs(math.hypot(xc - px, yc - py) - h.radius)
+    return d / ds.MM_TO_M
 _RESONANCE_IDS = {pe.Z0, pe.W_PLUS, -pe.W_PLUS, pe.HIGGS, pe.J_PSI}
 _SIGNATURE_KIND = {pe.ELECTRON: "electron", pe.MUON: "muon", pe.PHOTON: "photon",
                    pe.NU_E: "neutrino", pe.NU_MU: "neutrino", pe.NU_TAU: "neutrino"}
@@ -521,7 +583,7 @@ _ALIASES = {
     "nu": "neutrino", "neutrino": "neutrino", "neutrinos": "neutrino", "ν": "neutrino",
     "met": "neutrino", "missing energy": "neutrino",
 }
-PARENT_OF = {"z_mumu": "Z0", "z_ee": "Z0", "h_gammagamma": "H0", "h_zz_4l": "H0",
+PARENT_OF = {"z_mumu": "Z0", "z_ee": "Z0", "z_tautau": "Z0", "h_gammagamma": "H0", "h_zz_4l": "H0",
              "ww_lnulnu": "W+W-", "jpsi_mumu": "J/psi"}
 LARGE_MET_GEV = 25.0
 HARD_PHOTON_PT = 10.0
@@ -568,10 +630,20 @@ class Clues:
     large_met: bool
     candidate_final_state: str | None
     candidate_mass: float | None
-    hints: list[str]
+    hints: list[str]  # level-2 "senior physicist" interpretation hints
+    displaced_tracks: int = 0  # tracks with pT ≥ 2 GeV and |d₀| > 30 µm
+    max_d0_mm: float = 0.0
+    layer_hints: list[str] = field(default_factory=list)  # level-1: which layers fired
 
     def as_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
+
+    def evidence(self) -> dict[str, Any]:
+        """Raw detector-level numbers only (no interpretation, no object identification)."""
+        d = self.as_dict()
+        for k in ("hints", "layer_hints", "objects", "candidate_final_state"):
+            d.pop(k)
+        return d
 
 
 @dataclass
@@ -605,6 +677,9 @@ class Grade:
     truth_signature: dict[str, int]
     explanation: list[str]
     max_score: int = 100
+    truth_category: str | None = None  # Step-A category of the truth (e.g. "tautau")
+    guess_category: str | None = None  # set when the guess was given as a category
+    lesson: str = ""  # why the signature looks the way it does (PHYSICS_WHY)
 
 
 class MysteryChallenge:
@@ -664,6 +739,28 @@ class MysteryChallenge:
             layers.append("muon")
         cand = reconstruct(det, "auto", sel)
         large = det.met > LARGE_MET_GEV
+        pv = det.truth.primary_vertex
+        d0s = [transverse_impact_parameter_mm(t.track, pv) for t in det.traces
+               if t.track and t.track.reconstructed and t.track.pt_measured >= DISPLACED_MIN_PT]
+        displaced = sum(d > DISPLACED_D0_MM for d in d0s)
+        max_d0 = max(d0s, default=0.0)
+
+        ecal_towers = det.tower_energies(Layer.ECAL)
+        hcal_towers = det.tower_energies(Layer.HCAL)
+        n_mu_tracks = sum(1 for t in det.traces if t.track and t.track.muon_hits)
+        layer_hints = [
+            f"Silicon tracker: {s['n_tracks']} reconstructed tracks with {s['tracker_hits']} hits.",
+            f"ECAL: {s['ecal_energy']:.1f} GeV in {int((ecal_towers > 0.5).sum())} towers above "
+            f"0.5 GeV (hottest tower {ecal_towers.max():.1f} GeV).",
+            f"HCAL: {s['hcal_energy']:.1f} GeV in {int((hcal_towers > 0.5).sum())} towers above "
+            f"0.5 GeV (hottest tower {hcal_towers.max():.1f} GeV).",
+            f"Muon chambers: {s['muon_hits']} hits" + (f" on {n_mu_tracks} track(s)."
+                                                       if n_mu_tracks else " — silent."),
+            f"Vertexing: {displaced} hard track(s) with |d₀| > {DISPLACED_D0_MM * 1e3:.0f} µm "
+            f"(largest |d₀| = {max_d0 * 1e3:.0f} µm).",
+            f"Missing transverse energy: {det.met:.1f} GeV.",
+        ]
+
         hints = []
         if objs["muon"]:
             hints.append(f"{objs['muon']} track(s) punch through all calorimeters into the "
@@ -676,60 +773,105 @@ class MysteryChallenge:
         hints.append(f"Missing transverse energy is {det.met:.1f} GeV"
                      + (" — something invisible escaped (neutrinos?)." if large
                         else " — consistent with zero (only resolution effects)."))
+        if displaced:
+            hints.append(f"{displaced} energetic track(s) miss the collision vertex by more than "
+                         f"{DISPLACED_D0_MM * 1e3:.0f} µm — a short-lived particle decayed in flight "
+                         "(cτ of order 100 µm).")
         if cand:
             hints.append(f"The best {cand.label()} candidate has M_inv = {cand.mass:.2f} GeV.")
         return Clues(layers, s["n_tracks"], s["tracker_hits"], s["ecal_energy"],
                      s["hcal_energy"], s["muon_hits"], objs, det.met, det.met_phi, large,
-                     cand.final_state if cand else None, cand.mass if cand else None, hints)
+                     cand.final_state if cand else None, cand.mass if cand else None, hints,
+                     displaced, max_d0, layer_hints)
 
     # ---- grading ---------------------------------------------------------------------
-    def grade(self, mystery: MysteryEvent | str, particles: Mapping[str, int] | Iterable[str],
-              channel: str) -> Grade:
+    def grade(self, mystery: MysteryEvent | str,
+              particles: str | Mapping[str, int] | Iterable[str], channel: str) -> Grade:
+        """Score a claim (100 pts: 50 final state + 50 channel, with partial credit).
+
+        ``particles`` is either a Step-A category key (``FINAL_STATE_CATEGORIES``, e.g.
+        ``"tautau"``) or explicit particle counts (``{"muon": 2}`` / ``["mu+", "mu-"]``).
+        """
         me = self.events[mystery] if isinstance(mystery, str) else mystery
-        guess = normalize_particle_guess(particles)
         truth = me._truth_signature
-        exact = +guess == +truth
-        visible_truth = Counter({k: v for k, v in truth.items() if k != "neutrino"})
-        visible_guess = Counter({k: v for k, v in guess.items() if k != "neutrino"})
-        partial = not exact and visible_guess == visible_truth
+        truth_cat = SIGNATURE_CATEGORY.get(me._truth_channel)
+        guess_cat = None
+        lesson_partial = None
+        if isinstance(particles, str):
+            guess_cat = particles.strip()
+            if guess_cat not in FINAL_STATE_CATEGORIES:
+                raise ValueError(f"unknown final-state category {particles!r}; "
+                                 f"choose from {sorted(FINAL_STATE_CATEGORIES)}")
+            exact = guess_cat == truth_cat
+            lesson_partial = PARTIAL_CATEGORIES.get((truth_cat, guess_cat))
+            partial = not exact and lesson_partial is not None
+        else:
+            guess = normalize_particle_guess(particles)
+            exact = +guess == +truth
+            visible_truth = Counter({k: v for k, v in truth.items() if k != "neutrino"})
+            visible_guess = Counter({k: v for k, v in guess.items() if k != "neutrino"})
+            partial = not exact and visible_guess == visible_truth
+            if partial:
+                lesson_partial = ("You found every visible particle but missed the invisible "
+                                  "neutrinos — look at the missing transverse energy!")
         ch_ok = channel == me._truth_channel
         parent_ok = PARENT_OF.get(channel) == PARENT_OF.get(me._truth_channel)
         score = (50 if exact else 25 if partial else 0) + (50 if ch_ok else 25 if parent_ok else 0)
+
+        det = me.detector_event
+        ev = det.truth
         label = pe.CHANNELS[me._truth_channel].label
-        expl = [f"Truth: {label}  (generated M = {me.detector_event.truth.true_mass:.3f} GeV)."]
-        sig_txt = ", ".join(f"{n}× {k}" for k, n in sorted(truth.items()))
-        expl.append(f"Signature particles: {sig_txt}.")
-        if partial:
-            expl.append("You found every visible particle but missed the invisible neutrinos — "
-                        "look at the missing transverse energy!")
+        expl = [f"Truth: {label}  (generated M = {ev.true_mass:.3f} GeV)."]
+        sig_txt = ", ".join(f"{n}× {k}" for k, n in sorted(truth.items())) or "hadrons only"
+        expl.append(f"Signature particles from the hard decay: {sig_txt}.")
+        if lesson_partial:
+            expl.append(lesson_partial)
         if not ch_ok and parent_ok:
             expl.append("Right parent particle, wrong decay mode.")
         if me.clues.candidate_mass is not None:
+            parent = pe.CHANNELS[me._truth_channel].resonance
             expl.append(f"Reconstructed M_inv = {me.clues.candidate_mass:.2f} GeV vs PDG "
-                        f"{PARENT_OF[me._truth_channel]} mass.")
+                        f"m({PARENT_OF[me._truth_channel]}) = {pe.pdg(parent).mass:.3f} GeV.")
+        mex, mey, nu_pt = ev.truth_missing_pt()
+        if ev.neutrinos():
+            expl.append(f"{len(ev.neutrinos())} neutrino(s) escaped with Σp_T = {nu_pt:.1f} GeV; "
+                        f"the detector measured missing E_T = {det.met:.1f} GeV.")
+        flights = [p for p in ev.particles if abs(p.pdg_id) == pe.TAU and p.decay_vertex]
+        if flights:
+            expl.append("τ flight lengths: " + ", ".join(f"{p.flight_length_mm:.2f} mm"
+                                                         for p in flights)
+                        + f" (βγcτ, cτ = {pe.pdg(pe.TAU).ctau_mm * 1e3:.0f} µm); "
+                        f"{me.clues.displaced_tracks} displaced track(s) seen.")
         return Grade(exact, partial, ch_ok, parent_ok, score, me._truth_channel, label,
-                     dict(truth), expl)
+                     dict(truth), expl, truth_category=truth_cat, guess_category=guess_cat,
+                     lesson=PHYSICS_WHY.get(me._truth_channel, ""))
 
 
-def deduce_from_clues(clues: Clues) -> tuple[dict[str, int], str]:
+def deduce_from_clues(clues: Clues) -> tuple[str, str]:
     """A rule-based 'junior physicist' that answers using ONLY the public clues.
-    Demonstrates (and tests) that every mystery is solvable without the MC truth."""
+    Returns (final-state category, channel). Demonstrates (and tests) that every mystery is
+    solvable without the MC truth."""
     o, m = clues.objects, clues.candidate_mass or 0.0
     fs = clues.candidate_final_state
+    n_lep = o["muon"] + o["electron"]
     mz, mh, mj = pe.pdg(pe.Z0).mass, pe.pdg(pe.HIGGS).mass, pe.pdg(pe.J_PSI).mass
     if fs == "4l":
-        n_mu = min(o["muon"], 4) if o["muon"] in (2, 4) else 2
-        return {"muon": n_mu, "electron": 4 - n_mu}, "h_zz_4l"
-    if clues.large_met and (o["muon"] + o["electron"]) >= 2:
-        return {"muon": min(o["muon"], 2), "electron": 2 - min(o["muon"], 2),
-                "neutrino": 2}, "ww_lnulnu"
-    if fs == "gammagamma" or (o["photon"] >= 2 and abs(m - mh) < 15):
-        return {"photon": 2}, "h_gammagamma"
-    if fs == "mumu":
-        return {"muon": 2}, ("jpsi_mumu" if abs(m - mj) < abs(m - mz) else "z_mumu")
-    if fs == "ee":
-        return {"electron": 2}, "z_ee"
-    return {"muon": 2, "neutrino": 2}, "ww_lnulnu"
+        return "4l", "h_zz_4l"
+    if (fs == "gammagamma" or o["photon"] >= 2) and abs(m - mh) < 15 and n_lep < 2:
+        return "gammagamma", "h_gammagamma"
+    if clues.displaced_tracks >= 1:  # tracks missing the vertex: τ decays in flight
+        return "tautau", "z_tautau"
+    if clues.large_met and n_lep >= 2:
+        return "llnunu", "ww_lnulnu"
+    if fs in ("mumu", "ee"):
+        if fs == "mumu" and abs(m - mj) < 0.3:
+            return "mumu", "jpsi_mumu"
+        if abs(m - mz) < 12:
+            return fs, f"z_{fs}"
+    if fs in ("mumu", "ee", "emu") and n_lep >= 2:
+        # off-peak lepton pair: prompt W leptons are hard (M_ℓℓ large); τ daughters are soft
+        return ("llnunu", "ww_lnulnu") if m > 60 else ("tautau", "z_tautau")
+    return "tautau", "z_tautau"
 
 
 # --------------------------------------------------------------------------------------
@@ -817,11 +959,11 @@ def run_self_test(seed: int = 2026) -> bool:
     # 3. Mystery challenge
     print("\n[3] Mystery Event Challenge — rule-based solver uses public clues only")
     game = MysteryChallenge(seed=seed)
-    total, n_rounds = 0, 24
+    total, n_rounds = 0, 28
     for i in range(n_rounds):
         me = game.new_event(MYSTERY_POOL[i % len(MYSTERY_POOL)])
-        guess_p, guess_ch = deduce_from_clues(me.clues)
-        g = game.grade(me, guess_p, guess_ch)
+        guess_fs, guess_ch = deduce_from_clues(me.clues)
+        g = game.grade(me, guess_fs, guess_ch)
         total += g.score
         if i < len(MYSTERY_POOL):
             c = me.clues

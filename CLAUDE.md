@@ -20,7 +20,8 @@ an ATLAS/CMS-style detector simulation, an invariant-mass analysis lab, and a da
 ## Strict 4-File Modular Architecture
 
 Source code is confined to these four modules (plus one static HTML page). Do not add
-new source modules; tests in `tests/` and config files are the only extras.
+new source modules; tests in `tests/`, config files, `README.md` and `docs/` images are the
+only extras.
 
 1. **`physics_engine.py`** — PDG database integration (`particle` library), relativistic
    4-momentum vectors (E, px, py, pz) in natural units (GeV, c = 1), relativistic
@@ -86,9 +87,15 @@ Detector coordinates are in **metres** (truth vertices in mm are converted on en
   (`mass ± mass_err`, `width`, `sigma`, `significance` = S/√B, `significance_asimov`).
 - `LuminosityRun(signal_channel, beam, signal_fraction, ...)`: `run(n)` accumulates
   (incremental — suited to live UI updates), `fit(model)`.
-- `MysteryChallenge(beam, seed)`: `new_event()` → `MysteryEvent` (`public_view()` strips all
-  MC truth), `grade(event, particles, channel)` → `Grade` (100 pts: 50 particles, 50 channel,
-  partial credit). `deduce_from_clues(clues)` is a clue-only reference solver.
+- `MysteryChallenge(beam, seed)`: pool `MYSTERY_POOL` (7 channels incl. `z_tautau`);
+  `new_event()` → `MysteryEvent` (`public_view()` strips all MC truth);
+  `grade(event, particles, channel)` → `Grade` (100 pts: 50 final state, 50 channel, partial
+  credit via `PARTIAL_CATEGORIES`; `lesson` from `PHYSICS_WHY`). `particles` is a category key
+  of `FINAL_STATE_CATEGORIES` (`ee mumu gammagamma 4l tautau llnunu`) or explicit counts.
+- `Clues`: raw evidence (`evidence()` drops hints/object IDs), `layer_hints` (hint level 1),
+  `hints` (level 2), `displaced_tracks` / `max_d0_mm` from
+  `transverse_impact_parameter_mm(track, pv)` (|d₀| > 30 µm, p_T ≥ 2 GeV — helix geometry only).
+- `deduce_from_clues(clues)` → `(category, channel)`: clue-only reference solver (≈ 97/100).
 
 `LuminosityRun.last_event` / `last_selected` hold the most recent `(DetectorEvent, Candidate)`
 so a live display can show a representative event without re-simulating.
@@ -113,9 +120,19 @@ JSON is strict (NaN/inf → `null`); display coordinates in **m**, vertices in *
   a new one (`new_run: true`). Returns histogram, counts, fit (`mass ± err`, Γ, σ, S/√B,
   Asimov Z, `discovery` at Z_A ≥ 5, smooth `curve` total/background) once ≥ 30 entries, plus a
   representative event. `DELETE /api/luminosity/{run_id}` frees a run (LRU of 8 kept anyway).
-- `POST /api/mystery/new` → `{challenge_id, clues, event}` with **all MC truth stripped**
-  (no names/PDG ids/fates/origins, no invisible or truth-only neutral lines);
-  `POST /api/mystery/guess` `{challenge_id, particles, channel}` → `grade` + full `reveal`.
+- `POST /api/mystery/new` `{b_field_tesla, player, channel?, seed?}` → `{challenge_id, clues
+  (raw evidence), event, pool, final_states, hint_costs, stats}`. Blind events strip **all** MC
+  truth: names/PDG ids/fates/origins, invisible & truth-only neutral lines, truth vertices,
+  object `kind`, candidate final-state label.
+- `POST /api/mystery/hint` `{challenge_id, level: 1|2}` → hints; costs 5 / +15 pts until graded.
+- `POST /api/mystery/guess` `{challenge_id, particles, channel, player}` → `grade`,
+  `final_score` (after hint penalty), explanation, full `reveal`, player `stats` (rounds, total,
+  streak, best streak, history). One claim per event — repeats replay the verdict
+  (`already_graded`). `GET /api/mystery/stats?player=` → stats.
+- UI: Collider Lab / Mystery Challenge modes, evidence spotlight, Step A/B pills, 📸 PNG snapshot
+  (re-renders the display + inset at ≥ 2× scale). `<body data-state>` / `data-errors` expose UI
+  state for the headless end-to-end test. Extra URL options: `mode=mystery&mchannel=&mseed=&
+  hints=&mfs=&mguess=&autosubmit=1`, `sf=&tick=&stopat=` (used to render `docs/*.png`).
 - Kinematically impossible requests → HTTP 422 with the physics reason.
 
 ## Milestone Checklist
@@ -123,6 +140,6 @@ JSON is strict (NaN/inf → `null`); display coordinates in **m**, vertices in *
 - [x] **Milestone 1 (25%):** Setup + `CLAUDE.md` + `physics_engine.py` built, verified with conservation tests, and committed.
 - [x] **Milestone 2 (50%):** `detector_sim.py` + `invariance_lab.py` built, verified end-to-end in terminal, and committed.
 - [x] **Milestone 3 (75%):** `app.py` + `static/index.html` interactive CERN Control Room & ATLAS Event Display live on localhost and committed.
-- [ ] **Milestone 4 (100%):** "Lead Scientist / Mystery Event" educational game mode + Lorentzian resonance peak fitter + polished GitHub `README.md` completed and committed.
+- [x] **Milestone 4 (100%):** "Lead Scientist / Mystery Event" educational game mode + Lorentzian resonance peak fitter + polished GitHub `README.md` completed and committed.
 
 Work proceeds strictly one milestone at a time; stop for review after each milestone.

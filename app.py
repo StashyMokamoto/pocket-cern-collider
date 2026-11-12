@@ -10,8 +10,10 @@ the three physics modules:
     GET  /api/config            → beams, channels (PDG masses, thresholds), detector geometry
     POST /api/collide           → one collision: truth → detector → reconstruction payload
     POST /api/luminosity/step   → advance a signal+background run by N events, histogram + fit
-    POST /api/mystery/new       → a Mystery Event (MC truth stripped)
-    POST /api/mystery/guess     → grade a guess, reveal the truth
+    POST /api/mystery/new       → a Mystery Event (MC truth & object IDs stripped)
+    POST /api/mystery/hint      → physics hints (level 1: layers, level 2: interpretation)
+    POST /api/mystery/guess     → grade a discovery claim, reveal the truth, update stats
+    GET  /api/mystery/stats     → a player's running score & streak
 
 Run it:   .venv/Scripts/python app.py          (→ http://127.0.0.1:8000)
      or   .venv/Scripts/python -m uvicorn app:app --port 8000
@@ -53,6 +55,8 @@ MAX_LUMI_RUNS = 8
 MAX_MYSTERY_EVENTS = 256
 VERTEX_MIN_FLIGHT_MM = 1e-3  # secondary vertices shown in the zoom inset (≥ 1 µm)
 FIT_CURVE_POINTS = 240
+HINT_COSTS = {1: 5, 2: 15}  # points deducted for physics hint level 1 (layers) / 2 (interpretation)
+MAX_PLAYERS = 1000
 
 BeamKind = Literal["ee", "pp"]
 FitModel = Literal["voigt", "breit_wigner", "lorentzian", "gaussian"]
@@ -201,11 +205,7 @@ def config_payload() -> dict[str, Any]:
         "channels": [channel_info(ch) for ch in pe.CHANNELS.values()],
         "fit_models": list(lab.FIT_MODELS),
         "detector": detector_info(),
-        "mystery": {
-            "pool": [{"key": k, "label": pe.CHANNELS[k].label} for k in lab.MYSTERY_POOL],
-            "particle_choices": ["electron", "muon", "photon", "neutrino"],
-            "beam": beam_info(pe.BeamConfig("pp", 1000.0)),
-        },
+        "mystery": mystery_meta(),
         "limits": {"max_events_per_step": MAX_EVENTS_PER_STEP,
                    "min_entries_for_fit": MIN_ENTRIES_FOR_FIT},
     }
@@ -277,6 +277,8 @@ def event_payload(det: ds.DetectorEvent, cand: lab.Candidate | None, *,
             "dir": [_f(c, 6) for c in u],
             "radius_m": _f(track.radius_m, 4) if track else None,
             "reconstructed": bool(track.reconstructed) if track else False,
+            "d0_mm": _f(lab.transverse_impact_parameter_mm(track, ev.primary_vertex), 5)
+                     if track else None,
         }
         if not hide_truth:
             item.update({
@@ -303,8 +305,15 @@ def event_payload(det: ds.DetectorEvent, cand: lab.Candidate | None, *,
             "n_muon_hits": len(o.track.muon_hits) if o.track else 0,
             "track_radius_m": _f(o.track.radius_m, 4) if o.track else None,
             "calo_E": _f(sum(d.energy for d in o.deposits), 4),
+            "ecal_E": _f(sum(d.energy for d in o.deposits if d.layer is ds.Layer.ECAL), 4),
+            "hcal_E": _f(sum(d.energy for d in o.deposits if d.layer is ds.Layer.HCAL), 4),
+            "has_track": o.track is not None,
+            "d0_mm": _f(lab.transverse_impact_parameter_mm(o.track, ev.primary_vertex), 5)
+                     if o.track else None,
         }
-        if not hide_truth:
+        if hide_truth:
+            item["kind"] = None  # identification is the player's job in Mystery mode
+        else:
             p = ev.particles[o.truth_index]
             item.update({"truth_name": p.name, "truth_pt": _f(p.p4.pt), "truth_E": _f(p.p4.E),
                          "truth_charge": _f(p.charge, 3), "origin": origins[p.index]})
@@ -358,6 +367,10 @@ def event_payload(det: ds.DetectorEvent, cand: lab.Candidate | None, *,
     if hide_truth:
         payload["summary"].pop("n_invisible", None)
         payload["summary"].pop("n_escaped_forward", None)
+        payload["vertices"] = []  # truth decay vertices: not measurable for 1-prong decays
+        if candidate is not None:  # keep the mass, not the (identifying) final-state label
+            n = len(candidate["objects"])
+            candidate.update({"final_state": None, "label": f"{n}-object combination"})
         return payload
 
     mex, mey, tmet = ev.truth_missing_pt()
@@ -416,16 +429,27 @@ class LuminosityRequest(BaseModel):
     seed: int | None = None
 
 
+PLAYER_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
+
 class MysteryNewRequest(BaseModel):
     b_field_tesla: float = Field(3.8, ge=B_FIELD_RANGE[0], le=B_FIELD_RANGE[1])
-    channel: str | None = None  # force a pool channel (debug / tests)
+    channel: str | None = None  # force a pool channel (debug / tests / screenshots)
     seed: int | None = None
+    player: str | None = Field(None, pattern=PLAYER_PATTERN)
+
+
+class MysteryHintRequest(BaseModel):
+    challenge_id: str
+    level: Literal[1, 2] = 1
 
 
 class MysteryGuessRequest(BaseModel):
     challenge_id: str
-    particles: dict[str, int] | list[str]
+    # a Step-A category ("tautau", see /api/config -> mystery.final_states) or particle counts
+    particles: str | dict[str, int] | list[str]
     channel: str
+    player: str | None = Field(None, pattern=PLAYER_PATTERN)
 
 
 def _check_channel(key: str, *, signal_only: bool = False) -> pe.Channel:
@@ -546,8 +570,30 @@ def luminosity_payload(run_id: str, slot: _RunSlot, req: LuminosityRequest, new_
 # Mystery mode state
 # --------------------------------------------------------------------------------------
 
+
+def mystery_meta() -> dict[str, Any]:
+    return {
+        "pool": [{"key": k, "label": pe.CHANNELS[k].label, "parent": lab.PARENT_OF[k],
+                  "category": lab.SIGNATURE_CATEGORY[k]} for k in lab.MYSTERY_POOL],
+        "final_states": [{"key": k, "label": v} for k, v in lab.FINAL_STATE_CATEGORIES.items()],
+        "particle_choices": ["electron", "muon", "photon", "neutrino"],
+        "hint_costs": {str(k): v for k, v in HINT_COSTS.items()},
+        "beam": beam_info(pe.BeamConfig("pp", 1000.0)),
+        "displaced_d0_mm": lab.DISPLACED_D0_MM,
+    }
+
+
+class _MysterySlot:
+    def __init__(self, game: lab.MysteryChallenge, player: str):
+        self.game = game
+        self.player = player
+        self.hint_level = 0
+        self.result: dict[str, Any] | None = None  # cached response once graded
+
+
 _mystery_games: dict[float, lab.MysteryChallenge] = {}
-_mystery_events: OrderedDict[str, lab.MysteryChallenge] = OrderedDict()
+_mystery_events: OrderedDict[str, _MysterySlot] = OrderedDict()
+_players: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _mystery_lock = threading.Lock()
 
 
@@ -561,11 +607,49 @@ def _mystery_challenge(b_field: float, seed: int | None) -> lab.MysteryChallenge
     return _mystery_games[key]
 
 
+def _player_stats(player: str) -> dict[str, Any]:
+    if player not in _players:
+        _players[player] = {"player": player, "rounds": 0, "total_score": 0, "streak": 0,
+                            "best_streak": 0, "perfect": 0, "history": []}
+        while len(_players) > MAX_PLAYERS:
+            _players.popitem(last=False)
+    _players.move_to_end(player)
+    return _players[player]
+
+
+def _public_stats(st: dict[str, Any]) -> dict[str, Any]:
+    out = dict(st)
+    out["history"] = list(st["history"])
+    out["average"] = round(st["total_score"] / st["rounds"], 1) if st["rounds"] else None
+    return out
+
+
+def _slot(challenge_id: str) -> _MysterySlot:
+    with _mystery_lock:
+        slot = _mystery_events.get(challenge_id)
+    if slot is None or challenge_id not in slot.game.events:
+        raise HTTPException(404, f"unknown or expired challenge {challenge_id!r}")
+    return slot
+
+
+def _hints_for(me: lab.MysteryEvent, level: int) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    if level >= 1:
+        out["1"] = list(me.clues.layer_hints)
+    if level >= 2:
+        out["2"] = list(me.clues.hints)
+    return out
+
+
+def _penalty(level: int) -> int:
+    return sum(cost for lv, cost in HINT_COSTS.items() if lv <= level)
+
+
 # --------------------------------------------------------------------------------------
 # FastAPI application
 # --------------------------------------------------------------------------------------
 
-app = FastAPI(title="Pocket CERN Collider", version="0.3.0",
+app = FastAPI(title="Pocket CERN Collider", version="1.0.0",
               description="Relativistic event generator + detector simulation + analysis lab.")
 
 if STATIC_DIR.is_dir():
@@ -646,31 +730,44 @@ def luminosity_delete(run_id: str) -> dict[str, Any]:
 def mystery_new(req: MysteryNewRequest) -> dict[str, Any]:
     if req.channel is not None and req.channel not in lab.MYSTERY_POOL:
         raise HTTPException(422, f"channel must be one of {list(lab.MYSTERY_POOL)}")
+    player = req.player or "guest"
     with _mystery_lock:
         game = _mystery_challenge(req.b_field_tesla, req.seed)
         me = game.new_event(req.channel)
-        _mystery_events[me.challenge_id] = game
+        _mystery_events[me.challenge_id] = _MysterySlot(game, player)
         while len(_mystery_events) > MAX_MYSTERY_EVENTS:
-            old_id, old_game = _mystery_events.popitem(last=False)
-            old_game.events.pop(old_id, None)
+            old_id, old = _mystery_events.popitem(last=False)
+            old.game.events.pop(old_id, None)
+        stats = _public_stats(_player_stats(player))
     cand = lab.reconstruct(me.detector_event, "auto", game.selection)
-    display = event_payload(me.detector_event, cand, hide_truth=True)
     return {
         "challenge_id": me.challenge_id,
-        "clues": _clean(me.clues.as_dict()),
-        "event": display,
-        "pool": [{"key": k, "label": pe.CHANNELS[k].label} for k in game.pool],
-        "particle_choices": ["electron", "muon", "photon", "neutrino"],
+        "clues": _clean(me.clues.evidence()),  # raw numbers only; interpretation costs points
+        "event": event_payload(me.detector_event, cand, hide_truth=True),
+        **mystery_meta(),
         "beam": beam_info(game.beam),
+        "stats": stats,
     }
+
+
+@app.post("/api/mystery/hint")
+def mystery_hint(req: MysteryHintRequest) -> dict[str, Any]:
+    slot = _slot(req.challenge_id)
+    me = slot.game.events[req.challenge_id]
+    with _mystery_lock:
+        if slot.result is None:  # hints after the verdict are free
+            slot.hint_level = max(slot.hint_level, req.level)
+        level = max(slot.hint_level, req.level)
+    return {"challenge_id": req.challenge_id, "level": level, "hints": _hints_for(me, level),
+            "penalty": _penalty(slot.hint_level)}
 
 
 @app.post("/api/mystery/guess")
 def mystery_guess(req: MysteryGuessRequest) -> dict[str, Any]:
-    with _mystery_lock:
-        game = _mystery_events.get(req.challenge_id)
-    if game is None or req.challenge_id not in game.events:
-        raise HTTPException(404, f"unknown or expired challenge {req.challenge_id!r}")
+    slot = _slot(req.challenge_id)
+    game = slot.game
+    if slot.result is not None:  # one claim per event: replay the verdict, no re-scoring
+        return {**slot.result, "already_graded": True}
     if req.channel not in game.pool:
         raise HTTPException(422, f"channel must be one of {list(game.pool)}")
     try:
@@ -678,9 +775,41 @@ def mystery_guess(req: MysteryGuessRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     me = game.events[req.challenge_id]
+    penalty = _penalty(slot.hint_level)
+    final = max(0, grade.score - penalty)
+    correct = grade.particles_correct and grade.channel_correct
+    with _mystery_lock:
+        st = _player_stats(req.player or slot.player)
+        st["rounds"] += 1
+        st["total_score"] += final
+        st["streak"] = st["streak"] + 1 if correct else 0
+        st["best_streak"] = max(st["best_streak"], st["streak"])
+        st["perfect"] += final == 100
+        st["history"] = (st["history"] + [{"challenge_id": req.challenge_id,
+                                           "truth": grade.truth_channel, "guess": req.channel,
+                                           "score": final}])[-10:]
+        stats = _public_stats(st)
     cand = lab.reconstruct(me.detector_event, "auto", game.selection)
-    return {"challenge_id": req.challenge_id, "grade": _clean(dict(grade.__dict__)),
-            "reveal": event_payload(me.detector_event, cand)}
+    result = {
+        "challenge_id": req.challenge_id,
+        "grade": _clean(dict(grade.__dict__)),
+        "hint_level": slot.hint_level, "hint_penalty": penalty, "final_score": final,
+        "correct": correct,
+        "truth_category_label": lab.FINAL_STATE_CATEGORIES.get(grade.truth_category or ""),
+        "hints": _hints_for(me, 2),
+        "reveal": event_payload(me.detector_event, cand),
+        "stats": stats,
+    }
+    slot.result = result
+    return {**result, "already_graded": False}
+
+
+@app.get("/api/mystery/stats")
+def mystery_stats(player: str = "guest") -> dict[str, Any]:
+    with _mystery_lock:
+        if player not in _players:
+            raise HTTPException(404, f"no games recorded for player {player!r}")
+        return _public_stats(_players[player])
 
 
 def main(host: str = "127.0.0.1", port: int = 8000) -> None:

@@ -51,7 +51,11 @@ def test_config(client):
     assert layers == {"beam_pipe": (0.0, 0.03), "tracker": (0.03, 1.10), "ecal": (1.10, 1.70),
                       "hcal": (1.70, 2.80), "muon": (2.80, 4.50)}
     assert cfg["detector"]["b_field_default"] == 3.8 and cfg["detector"]["eta_max"] == 2.5
-    assert len(cfg["mystery"]["pool"]) == 6
+    m = cfg["mystery"]
+    assert [c["key"] for c in m["pool"]] == list(server.lab.MYSTERY_POOL) and len(m["pool"]) == 7
+    assert {f["key"] for f in m["final_states"]} == {"ee", "mumu", "gammagamma", "4l", "tautau",
+                                                       "llnunu"}
+    assert m["hint_costs"] == {"1": 5, "2": 15}
 
 
 # ---- /api/collide -------------------------------------------------------------------
@@ -195,37 +199,191 @@ def test_luminosity_rejects_channels_without_peak(client):
         assert r.status_code == 422, body
 
 
-# ---- mystery hooks ------------------------------------------------------------------
+# ---- Mystery Event Challenge: full workflow ------------------------------------------
+
+TRUTH_LEAKS = ('"name"', '"pdg_id"', '"fate"', '"truth', '"origin"', '"class"', '"hints"',
+               '"layer_hints"', '"final_state": "', "mu+", "Z0", "tau", "nu(")
 
 
-def test_mystery_new_hides_truth_and_guess_grades(client):
-    r = client.post("/api/mystery/new", json={"channel": "z_mumu", "seed": 9})
-    assert r.status_code == 200
-    m = _strict_json(r)
-    text = r.text
-    for leak in ('"name"', '"pdg_id"', '"fate"', '"truth', '"origin"', '"class"', "mu+", "Z0"):
-        assert leak not in text, leak
-    assert m["clues"]["objects"]["muon"] >= 2
-    assert all(t["visible_track"] for t in m["event"]["traces"])
+def _new(client, **kw):
+    r = client.post("/api/mystery/new", json=kw)
+    assert r.status_code == 200, r.text
+    return r, _strict_json(r)
 
+
+@pytest.mark.parametrize("channel", list(server.lab.MYSTERY_POOL))
+def test_mystery_blind_event_hides_truth_and_identification(client, channel):
+    _, m = _new(client, channel=channel, seed=9, player="blind_test")
+    blind = json.dumps({"event": m["event"], "clues": m["clues"]}, ensure_ascii=False)
+    for leak in TRUTH_LEAKS:  # (the answer *menu* — pool/final_states — is public, the event is not)
+        assert leak not in blind, (channel, leak)
+    ev = m["event"]
+    assert all(o["kind"] is None for o in ev["objects"])  # the player must identify them
+    assert all(t["visible_track"] for t in ev["traces"])  # no neutrino / photon truth lines
+    assert ev["vertices"] == []
+    assert ev["candidate"] is None or ev["candidate"]["final_state"] is None
+    # evidence = raw detector numbers only
+    assert set(m["clues"]) == {"layers_lit", "n_tracks", "tracker_hits", "ecal_energy",
+                               "hcal_energy", "muon_hits", "met", "met_phi", "large_met",
+                               "candidate_mass", "displaced_tracks", "max_d0_mm"}
+    assert len(m["pool"]) == 7 and len(m["final_states"]) == 6
+
+
+def test_mystery_full_workflow_hints_scoring_and_streak(client):
+    player = "workflow_player"
+    # round 1: perfect claim without hints
+    _, m1 = _new(client, channel="z_mumu", seed=21, player=player)
+    assert m1["stats"]["rounds"] == 0
+    g1 = client.post("/api/mystery/guess", json={"challenge_id": m1["challenge_id"],
+                                                 "particles": "mumu", "channel": "z_mumu",
+                                                 "player": player}).json()
+    assert not g1["already_graded"] and g1["correct"]
+    assert g1["final_score"] == g1["grade"]["score"] == 100 and g1["hint_penalty"] == 0
+    assert g1["grade"]["truth_category"] == "mumu" and "muon spectrometer" in g1["grade"]["lesson"]
+    assert g1["reveal"]["truth"]["channel"] == "z_mumu"  # full MC truth after the claim
+    assert g1["stats"]["rounds"] == 1 and g1["stats"]["streak"] == 1
+
+    # round 2: two hint levels cost 5 + 15 points, still a correct (streak-extending) claim
+    _, m2 = _new(client, channel="h_gammagamma", seed=22, player=player)
+    h1 = client.post("/api/mystery/hint", json={"challenge_id": m2["challenge_id"], "level": 1}).json()
+    assert h1["penalty"] == 5 and list(h1["hints"]) == ["1"]
+    assert any("ECAL" in x for x in h1["hints"]["1"]) and any("Muon chambers" in x for x in h1["hints"]["1"])
+    h2 = client.post("/api/mystery/hint", json={"challenge_id": m2["challenge_id"], "level": 2}).json()
+    assert h2["penalty"] == 20 and set(h2["hints"]) == {"1", "2"}
+    assert any("photon" in x for x in h2["hints"]["2"])
+    g2 = client.post("/api/mystery/guess", json={"challenge_id": m2["challenge_id"],
+                                                 "particles": "gammagamma",
+                                                 "channel": "h_gammagamma", "player": player}).json()
+    assert g2["correct"] and g2["final_score"] == 80 and g2["hint_level"] == 2
+    assert g2["stats"]["streak"] == 2 and g2["stats"]["best_streak"] == 2
+
+    # round 3: W⁺W⁻ claimed as Z → μμ — leptons right, neutrinos missed: partial credit
+    _, m3 = _new(client, channel="ww_lnulnu", seed=23, player=player)
+    g3 = client.post("/api/mystery/guess", json={"challenge_id": m3["challenge_id"],
+                                                 "particles": "mumu", "channel": "z_mumu",
+                                                 "player": player}).json()
+    assert not g3["correct"] and g3["grade"]["particles_partial"] and g3["final_score"] == 25
+    assert any("neutrinos" in x for x in g3["grade"]["explanation"])
+    assert g3["reveal"]["met"]["truth_met"] > 0  # invisible ν vectors now available to draw
+    assert g3["stats"]["streak"] == 0 and g3["stats"]["best_streak"] == 2
+
+    # a second claim on the same event replays the verdict and does not touch the stats
+    again = client.post("/api/mystery/guess", json={"challenge_id": m3["challenge_id"],
+                                                    "particles": "llnunu",
+                                                    "channel": "ww_lnulnu", "player": player}).json()
+    assert again["already_graded"] and again["final_score"] == 25
+    st = client.get("/api/mystery/stats", params={"player": player}).json()
+    assert st["rounds"] == 3 and st["total_score"] == 205 and st["average"] == pytest.approx(68.3)
+    assert [h["score"] for h in st["history"]] == [100, 80, 25]
+    # hints after the verdict are free and complete
+    late = client.post("/api/mystery/hint", json={"challenge_id": m3["challenge_id"], "level": 2}).json()
+    assert set(late["hints"]) == {"1", "2"} and late["penalty"] == 0
+
+
+def test_mystery_tau_event_explains_displacement(client):
+    _, m = _new(client, channel="z_tautau", seed=3, player="tau_player")
     g = client.post("/api/mystery/guess", json={"challenge_id": m["challenge_id"],
-                                                "particles": {"muon": 2}, "channel": "z_mumu"})
-    assert g.status_code == 200
-    out = g.json()
-    assert out["grade"]["score"] == 100 and out["grade"]["truth_channel"] == "z_mumu"
-    assert out["reveal"]["truth"]["channel"] == "z_mumu"
-
-    wrong = client.post("/api/mystery/guess", json={"challenge_id": m["challenge_id"],
-                                                    "particles": ["electron", "electron"],
-                                                    "channel": "z_ee"}).json()
-    assert wrong["grade"]["score"] == 25  # right parent (Z), wrong decay & particles
+                                                "particles": "tautau", "channel": "z_tautau",
+                                                "player": "tau_player"}).json()
+    assert g["correct"] and g["final_score"] == 100
+    assert "displaced vertex" in g["grade"]["lesson"]
+    assert any("τ flight lengths" in x for x in g["grade"]["explanation"])
+    taus = [v for v in g["reveal"]["vertices"] if v["name"].startswith("tau")]
+    assert len(taus) == 2  # revealed only after the claim
+    assert len([t for t in g["reveal"]["traces"] if t["class"] == "neutrino"]) >= 2
 
 
 def test_mystery_errors(client):
-    assert client.post("/api/mystery/guess", json={"challenge_id": "nope", "particles": [],
+    assert client.post("/api/mystery/guess", json={"challenge_id": "nope", "particles": "ee",
                                                    "channel": "z_mumu"}).status_code == 404
+    assert client.post("/api/mystery/hint", json={"challenge_id": "nope"}).status_code == 404
     assert client.post("/api/mystery/new", json={"channel": "dy_mumu"}).status_code == 422
-    m = client.post("/api/mystery/new", json={"seed": 1}).json()
-    bad = client.post("/api/mystery/guess", json={"challenge_id": m["challenge_id"],
-                                                  "particles": ["gluino"], "channel": "z_mumu"})
-    assert bad.status_code == 422
+    assert client.post("/api/mystery/new", json={"player": "bad id!"}).status_code == 422
+    assert client.get("/api/mystery/stats", params={"player": "never_played"}).status_code == 404
+    _, m = _new(client, seed=1)
+    cid = m["challenge_id"]
+    assert client.post("/api/mystery/hint", json={"challenge_id": cid, "level": 3}).status_code == 422
+    for bad in ({"particles": "gluinos", "channel": "z_mumu"},
+                {"particles": ["gluino"], "channel": "z_mumu"},
+                {"particles": "ee", "channel": "dy_ee"}):
+        assert client.post("/api/mystery/guess", json={"challenge_id": cid, **bad}).status_code == 422
+    # explicit particle counts are still accepted
+    ok = client.post("/api/mystery/guess", json={"challenge_id": cid, "particles": {"muon": 2},
+                                                 "channel": "z_mumu"})
+    assert ok.status_code == 200
+
+
+def test_luminosity_lorentzian_peak_fit(client):
+    r = client.post("/api/luminosity/step", json={"channel": "z_ee", "n_events": 400, "seed": 7,
+                                                  "signal_fraction": 0.6, "fit_model": "lorentzian"})
+    fit = r.json()["fit"]
+    assert fit["model"] == "lorentzian" and fit["success"]
+    assert abs(fit["mass"] - pe.pdg(pe.Z0).mass) < 1.0 and fit["width"] > 0
+
+
+# ---- UI ------------------------------------------------------------------------------
+
+
+def test_ui_contains_mystery_and_snapshot_controls(client):
+    html = client.get("/").text
+    for needle in ('id="modeSeg"', 'id="mNewBtn"', 'id="pillsA"', 'id="pillsB"', 'id="claimBtn"',
+                   'id="evList"', 'id="sigTable"', 'id="hint1"', 'id="hint2"', 'id="resultBox"',
+                   'id="snapBtn"', "/api/mystery/new", "/api/mystery/hint", "/api/mystery/guess",
+                   "toBlob", "SUBMIT DISCOVERY CLAIM", "NEW MYSTERY COLLISION"):
+        assert needle in html, needle
+    assert "Milestone 4" not in html  # the locked placeholder is gone
+
+
+def _find_chrome():
+    import shutil
+    from pathlib import Path
+    for c in (shutil.which("chrome"), shutil.which("google-chrome"), shutil.which("chromium"),
+              shutil.which("msedge"),
+              r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+              r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"):
+        if c and Path(c).exists():
+            return c
+    return None
+
+
+@pytest.mark.skipif(_find_chrome() is None, reason="no headless Chrome/Edge available")
+def test_headless_browser_plays_a_full_mystery_round(tmp_path):
+    """End-to-end: real server + real browser — load a blind Z→ττ event, take a hint, pick
+    both answers, submit the claim; the page must reach the 'revealed' state error-free."""
+    import re
+    import socket
+    import subprocess
+    import threading
+    import time
+    import urllib.request
+
+    import uvicorn
+
+    with socket.socket() as s_:
+        s_.bind(("127.0.0.1", 0))
+        port = s_.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        url = (f"http://127.0.0.1:{port}/?mode=mystery&mchannel=z_tautau&mseed=3&hints=1"
+               "&mfs=tautau&mguess=z_tautau&autosubmit=1&anim=0&view=split")
+        out = subprocess.run([_find_chrome(), "--headless=new", "--disable-gpu",
+                              f"--user-data-dir={tmp_path}", "--window-size=1600,950",
+                              "--virtual-time-budget=15000", "--dump-dom", url],
+                             capture_output=True, text=True, encoding="utf-8", timeout=120)
+        dom = out.stdout
+        body = re.search(r"<body[^>]*>", dom).group(0)
+        assert 'data-state="mystery-revealed"' in body, body
+        assert "data-errors" not in body, body
+        assert "DISCOVERY CONFIRMED" in dom and "Physics hint" in dom
+        assert re.search(r'class="pill on truth"[^>]*data-v="tautau"', dom)
+    finally:
+        srv.should_exit = True
+        th.join(timeout=10)

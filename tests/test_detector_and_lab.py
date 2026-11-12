@@ -294,3 +294,50 @@ def test_mystery_solvable_from_clues_alone():
         me = game.new_event(il.MYSTERY_POOL[i % len(il.MYSTERY_POOL)])
         scores.append(game.grade(me, *il.deduce_from_clues(me.clues)).score)
     assert np.mean(scores) >= 75
+
+
+# ---- Milestone 4: category grading, impact parameter, solver over the full pool -------
+
+
+def test_impact_parameter_prompt_vs_tau():
+    det = Detector(seed=3)
+    gen = CollisionGenerator(BeamConfig("ee", 91.19), seed=3)
+    prompt = det.simulate(gen.generate("z_mumu"))
+    for t in prompt.traces:
+        if t.track:
+            assert il.transverse_impact_parameter_mm(t.track, prompt.truth.primary_vertex) < 1e-6
+    d0s = []
+    for _ in range(40):
+        d = det.simulate(gen.generate("z_tautau"))
+        d0s += [il.transverse_impact_parameter_mm(t.track, d.truth.primary_vertex)
+                for t in d.traces if t.track and t.track.reconstructed]
+    assert np.median(d0s) > 0.005 and max(d0s) > il.DISPLACED_D0_MM  # τ daughters miss the PV
+
+
+def test_category_grading_partial_credit_and_lessons():
+    game = il.MysteryChallenge(seed=12)
+    assert set(il.PHYSICS_WHY) == set(il.MYSTERY_POOL) == set(il.SIGNATURE_CATEGORY)
+    ww = game.new_event("ww_lnulnu")
+    g = game.grade(ww, "llnunu", "ww_lnulnu")
+    assert g.score == 100 and g.truth_category == "llnunu" and "neutrino" in g.lesson
+    g = game.grade(ww, "ee", "ww_lnulnu")
+    assert g.particles_partial and g.score == 75
+    tau = game.new_event("z_tautau")
+    g = game.grade(tau, "mumu", "z_mumu")
+    assert g.particles_partial and g.parent_correct and g.score == 50
+    assert game.grade(tau, "gammagamma", "h_gammagamma").score == 0
+    with pytest.raises(ValueError):
+        game.grade(tau, "gluinos", "z_tautau")
+
+
+def test_clue_solver_covers_every_pool_channel():
+    game = il.MysteryChallenge(seed=2027)
+    per = {ch: [] for ch in il.MYSTERY_POOL}
+    for i in range(7 * 12):
+        ch = il.MYSTERY_POOL[i % 7]
+        me = game.new_event(ch)
+        assert "hints" not in me.clues.evidence() and "objects" not in me.clues.evidence()
+        per[ch].append(game.grade(me, *il.deduce_from_clues(me.clues)).score)
+    means = {ch: np.mean(v) for ch, v in per.items()}
+    assert min(means.values()) >= 70, means
+    assert np.mean(list(means.values())) >= 90, means
