@@ -4,7 +4,7 @@
 Collide e⁺e⁻ or pp beams at up to 1 TeV and watch every particle curl through a 3.8 T
 ATLAS/CMS-style detector. Accumulate luminosity until a resonance peak rises out of the
 background at 5σ. Then switch to the **Mystery Event Challenge**: read a blind event the way
-an experimental physicist does and claim the discovery yourself.
+an experimental physicist does and claim the discovery yourself. try it yourself at https://pocket-cern-collider.onrender.com/
 
 ![Control room: a live H → ZZ* → 4ℓ luminosity run](docs/preview_control_room.png)
 
